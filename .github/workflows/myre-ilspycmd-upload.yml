@@ -1,0 +1,57 @@
+name: Publish existing ilspycmd build
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Upstream release tag with an existing draft
+        required: true
+        type: string
+      build_run:
+        description: NativeAOT build workflow run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.upstream_tag }}
+      BUILD_RUN: ${{ inputs.build_run }}
+    steps:
+      - name: Validate inputs and draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9][0-9A-Za-z._-]{0,63}$ ]]
+          [[ "$BUILD_RUN" =~ ^[0-9]+$ ]]
+          [[ "$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft --jq .isDraft)" == true ]]
+          upstream=$(gh api "repos/icsharpcode/ILSpy/commits/$RELEASE_TAG" --jq .sha)
+          [[ "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" == "$upstream" ]]
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: ilspycmd-*
+          path: dist
+          merge-multiple: true
+          run-id: ${{ inputs.build_run }}
+          github-token: ${{ github.token }}
+      - name: Upload release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for platform in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            test -f "ilspycmd-$RELEASE_TAG-$platform.tar.gz"
+          done
+          test -f "ilspycmd-$RELEASE_TAG-windows-x64.zip"
+          [[ $(find . -maxdepth 1 -type f | wc -l) -eq 5 ]]
+          sha256sum ilspycmd-* > SHA256SUMS
+          gh release upload "$RELEASE_TAG" --repo "$GH_REPO" ./*
+          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false --latest
