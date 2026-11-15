@@ -1,0 +1,151 @@
+name: Build ilspycmd NativeAOT
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: Published icsharpcode/ILSpy release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ilspycmd-${{ inputs.upstream_tag }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.source.outputs.tag }}
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$UPSTREAM_TAG" =~ ^v[0-9][0-9A-Za-z._-]{0,63}$ ]] || { echo 'Invalid upstream tag.' >&2; exit 1; }
+          gh release view "$UPSTREAM_TAG" --repo icsharpcode/ILSpy --json tagName,isDraft --jq 'select(.isDraft == false) | .tagName' | grep -Fx "$UPSTREAM_TAG"
+          commit=$(gh api "repos/icsharpcode/ILSpy/commits/$UPSTREAM_TAG" --jq .sha)
+          [[ "$commit" =~ ^[a-f0-9]{40}$ ]] || exit 1
+          echo "tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: source
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            rid: linux-x64
+            runner: ubuntu-22.04
+          - platform: linux-arm64
+            rid: linux-arm64
+            runner: ubuntu-22.04-arm
+          - platform: macos-x64
+            rid: osx-x64
+            runner: macos-15-intel
+          - platform: macos-arm64
+            rid: osx-arm64
+            runner: macos-15
+          - platform: windows-x64
+            rid: win-x64
+            runner: windows-2025-vs2026
+    env:
+      RELEASE_TAG: ${{ needs.source.outputs.tag }}
+      PLATFORM: ${{ matrix.platform }}
+      RID: ${{ matrix.rid }}
+      APPVEYOR_REPO_BRANCH: master
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: icsharpcode/ILSpy
+          ref: ${{ needs.source.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
+        with:
+          dotnet-version: '11.0.x'
+          dotnet-quality: preview
+      - name: Install Linux NativeAOT prerequisites
+        if: startsWith(matrix.platform, 'linux-')
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev
+      - name: Build NativeAOT
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          dotnet publish ICSharpCode.ILSpyCmd/ICSharpCode.ILSpyCmd.csproj -c Release -r $env:RID -p:IlspyCmdRidPackages=true -p:RestoreEnablePackagePruning=false -p:RestoreLockedMode=false --self-contained true -o ./publish-out
+      - name: Package executable and license
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item -ItemType Directory -Path dist,package -Force | Out-Null
+          Copy-Item LICENSE package/LICENSE
+          if ($env:PLATFORM -eq 'windows-x64') {
+            Copy-Item publish-out/ilspycmd.exe package/ilspycmd.exe
+            Compress-Archive -Path package/ilspycmd.exe,package/LICENSE -DestinationPath "dist/ilspycmd-$env:RELEASE_TAG-$env:PLATFORM.zip"
+          } else {
+            Copy-Item publish-out/ilspycmd package/ilspycmd
+            tar -czf "dist/ilspycmd-$env:RELEASE_TAG-$env:PLATFORM.tar.gz" -C package ilspycmd LICENSE
+          }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ilspycmd-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: [source, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.source.outputs.tag }}
+      SOURCE_COMMIT: ${{ needs.source.outputs.commit }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: ilspycmd-*
+          path: dist
+          merge-multiple: true
+      - name: Publish complete release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for platform in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            test -f "ilspycmd-$RELEASE_TAG-$platform.tar.gz"
+          done
+          test -f "ilspycmd-$RELEASE_TAG-windows-x64.zip"
+          [[ $(find . -maxdepth 1 -type f | wc -l) -eq 5 ]] || { echo 'Unexpected artifacts.' >&2; exit 1; }
+          sha256sum ilspycmd-* > SHA256SUMS
+          [[ "$(gh api "repos/icsharpcode/ILSpy/commits/$RELEASE_TAG" --jq .sha)" == "$SOURCE_COMMIT" ]] || { echo 'Upstream tag moved.' >&2; exit 1; }
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo 'Refusing to overwrite an existing release.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" --repo "$GH_REPO" --target "$SOURCE_COMMIT" --draft --title "ilspycmd $RELEASE_TAG" --notes "Unofficial NativeAOT builds of icsharpcode/ILSpy $RELEASE_TAG. Upstream commit: $SOURCE_COMMIT. Built by this fork; macOS binaries are not notarized."
+          [[ "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" == "$SOURCE_COMMIT" ]] || { echo 'Fork tag does not match the built source.' >&2; exit 1; }
+          gh release upload "$RELEASE_TAG" --repo "$GH_REPO" ./*
+          gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false --latest
