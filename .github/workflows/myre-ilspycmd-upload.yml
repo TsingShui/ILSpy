@@ -32,6 +32,8 @@ jobs:
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9][0-9A-Za-z._-]{0,63}$ ]]
           [[ "$BUILD_RUN" =~ ^[0-9]+$ ]]
+          builds=$(gh run view "$BUILD_RUN" --repo "$GH_REPO" --json name,status,jobs --jq 'select(.name == "Build ilspycmd NativeAOT" and .status == "completed") | [.jobs[] | select(.conclusion == "success") | .name] | unique | contains(["source", "Build linux-x64", "Build linux-arm64", "Build macos-x64", "Build macos-arm64", "Build windows-x64"])')
+          [[ "$builds" == true ]] || { echo 'The source and all five build jobs must have succeeded.' >&2; exit 1; }
           [[ "$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft --jq .isDraft)" == true ]]
           upstream=$(gh api "repos/icsharpcode/ILSpy/commits/$RELEASE_TAG" --jq .sha)
           [[ "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" == "$upstream" ]]

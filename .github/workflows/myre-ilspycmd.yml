@@ -141,11 +141,8 @@ jobs:
           [[ $(find . -maxdepth 1 -type f | wc -l) -eq 5 ]] || { echo 'Unexpected artifacts.' >&2; exit 1; }
           sha256sum ilspycmd-* > SHA256SUMS
           [[ "$(gh api "repos/icsharpcode/ILSpy/commits/$RELEASE_TAG" --jq .sha)" == "$SOURCE_COMMIT" ]] || { echo 'Upstream tag moved.' >&2; exit 1; }
-          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            echo 'Refusing to overwrite an existing release.' >&2
-            exit 1
-          fi
-          gh release create "$RELEASE_TAG" --repo "$GH_REPO" --target "$SOURCE_COMMIT" --draft --title "ilspycmd $RELEASE_TAG" --notes "Unofficial NativeAOT builds of icsharpcode/ILSpy $RELEASE_TAG. Upstream commit: $SOURCE_COMMIT. Built by this fork; macOS binaries are not notarized."
+          draft=$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft --jq .isDraft) || { echo 'Create a draft release for the verified upstream tag first.' >&2; exit 1; }
+          [[ "$draft" == true ]] || { echo 'Refusing to overwrite a published release.' >&2; exit 1; }
           [[ "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" == "$SOURCE_COMMIT" ]] || { echo 'Fork tag does not match the built source.' >&2; exit 1; }
           gh release upload "$RELEASE_TAG" --repo "$GH_REPO" ./*
           gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --draft=false --latest
